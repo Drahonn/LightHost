@@ -3,6 +3,87 @@
 #include "PluginWindow.h"
 #include <algorithm>
 
+//==============================================================================
+class IconMenu::PluginScanThread : public Thread
+{
+public:
+    PluginScanThread (IconMenu& owner_,
+                      AudioPluginFormatManager& fm,
+                      KnownPluginList& kpl,
+                      FileSearchPath searchPaths_,
+                      bool rescanAll_)
+        : Thread ("PluginScanThread"),
+          owner (owner_),
+          formatManager (fm),
+          knownPluginList (kpl),
+          searchPaths (searchPaths_),
+          rescanAll (rescanAll_)
+    {
+    }
+
+    ~PluginScanThread() override
+    {
+        stopThread (4000);
+    }
+
+    void run() override
+    {
+        const File deadMansPedalFile = getAppProperties().getUserSettings()
+                                       ->getFile().getSiblingFile ("RecentlyCrashedPluginsList");
+
+        if (rescanAll)
+            deadMansPedalFile.deleteFile();
+
+        const int initialCount = knownPluginList.getTypes().size();
+
+        for (int i = 0; i < formatManager.getNumFormats(); ++i)
+        {
+            if (threadShouldExit())
+                break;
+
+            auto* format = formatManager.getFormat (i);
+            if (format == nullptr)
+                continue;
+
+            FileSearchPath pathsToScan = searchPaths;
+            if (pathsToScan.getNumPaths() == 0)
+            {
+                pathsToScan = format->getDefaultLocationsToSearch();
+                for (const auto& p : owner.getCustomPluginPaths())
+                    pathsToScan.add (File (p));
+            }
+
+            PluginDirectoryScanner scanner (knownPluginList,
+                                           *format,
+                                           pathsToScan,
+                                           true, // search sub-directories recursively
+                                           deadMansPedalFile,
+                                           ! rescanAll);
+
+            String pluginBeingScanned;
+            while (! threadShouldExit() && scanner.scanNextFile (true, pluginBeingScanned))
+            {
+            }
+        }
+
+        const int finalCount = knownPluginList.getTypes().size();
+        const int newPluginsFound = finalCount - initialCount;
+
+        MessageManager::callAsync ([this, newPluginsFound, finalCount]()
+        {
+            owner.onPluginScanFinished (newPluginsFound, finalCount);
+        });
+    }
+
+private:
+    IconMenu& owner;
+    AudioPluginFormatManager& formatManager;
+    KnownPluginList& knownPluginList;
+    FileSearchPath searchPaths;
+    bool rescanAll;
+};
+
+//==============================================================================
 class IconMenu::PluginListWindow : public DocumentWindow
 {
 public:
@@ -72,10 +153,19 @@ IconMenu::IconMenu()
     setIcon();
     if (auto* app = JUCEApplication::getInstance())
         setIconTooltip (app->getApplicationName());
+
+    // Auto-scan default plugin paths in background on first run if list is empty
+    if (knownPluginList.getTypes().isEmpty())
+    {
+        startPluginScan (false);
+    }
 }
 
 IconMenu::~IconMenu()
 {
+    if (scanThread != nullptr)
+        scanThread->stopThread (4000);
+
     deviceManager.removeAudioCallback (&player);
     deviceManager.removeChangeListener (this);
     savePluginStates();
@@ -300,8 +390,22 @@ void IconMenu::timerCallback()
 
     if (menuIconLeftClicked)
     {
-        menu.addItem (1, "Preferences");
-        menu.addItem (2, "Edit Plugins");
+        menu.addItem (CMD_PREFERENCES, "Audio Settings");
+        menu.addItem (CMD_EDIT_PLUGINS, "Edit Plugins List...");
+        menu.addSeparator();
+
+        menu.addSectionHeader ("Plugin Scanner");
+        if (isScanning.load())
+        {
+            menu.addItem (-1, "Scanning in progress...", false);
+        }
+        else
+        {
+            menu.addItem (CMD_SCAN_PLUGINS, "Scan for Plugins");
+            menu.addItem (CMD_ADD_FOLDER, "Add Plugin Folder...");
+            menu.addItem (CMD_CLEAR_RESCAN, "Clear & Rescan All");
+        }
+
         menu.addSeparator();
         menu.addSectionHeader ("Active Plugins");
 
@@ -331,15 +435,25 @@ void IconMenu::timerCallback()
 
         menu.addSeparator();
         menu.addSectionHeader ("Available Plugins");
-        KnownPluginList::addToMenu (menu, knownPluginList.getTypes(), pluginSortMethod);
+        if (knownPluginList.getTypes().isEmpty())
+        {
+            if (isScanning.load())
+                menu.addItem (-2, "(Scanning in progress...)", false);
+            else
+                menu.addItem (-2, "(No plugins found - click 'Scan for Plugins' above)", false);
+        }
+        else
+        {
+            KnownPluginList::addToMenu (menu, knownPluginList.getTypes(), pluginSortMethod);
+        }
     }
     else
     {
-        menu.addItem (1, "Quit");
+        menu.addItem (CMD_QUIT, "Quit");
         menu.addSeparator();
-        menu.addItem (2, "Delete Plugin States");
+        menu.addItem (CMD_DELETE_STATES, "Delete Plugin States");
         #if ! JUCE_MAC
-        menu.addItem (3, "Invert Icon Color");
+        menu.addItem (CMD_INVERT_ICON, "Invert Icon Color");
         #endif
     }
 
@@ -368,7 +482,7 @@ void IconMenu::mouseDown (const MouseEvent& e)
 
 void IconMenu::menuInvocationCallback (int id)
 {
-    if (id == 0)
+    if (id <= 0)
     {
         #if JUCE_MAC
         if (! PluginWindow::containsActiveWindows())
@@ -378,131 +492,148 @@ void IconMenu::menuInvocationCallback (int id)
     }
 
     // Right-click menu options
-    if (! menuIconLeftClicked)
+    if (id == CMD_QUIT)
     {
-        if (id == 1)
-        {
-            savePluginStates();
-            if (auto* app = JUCEApplication::getInstance())
-                app->quit();
-            return;
-        }
-        if (id == 2)
-        {
-            deletePluginStates();
-            loadActivePlugins();
-            return;
-        }
-        if (id == 3)
-        {
-            String color = getAppProperties().getUserSettings()->getValue ("icon");
-            getAppProperties().getUserSettings()->setValue ("icon", color.equalsIgnoreCase ("black") ? "white" : "black");
-            setIcon();
-            return;
-        }
+        savePluginStates();
+        if (auto* app = JUCEApplication::getInstance())
+            app->quit();
+        return;
+    }
+    if (id == CMD_DELETE_STATES)
+    {
+        deletePluginStates();
+        loadActivePlugins();
+        return;
+    }
+    if (id == CMD_INVERT_ICON)
+    {
+        String color = getAppProperties().getUserSettings()->getValue ("icon");
+        getAppProperties().getUserSettings()->setValue ("icon", color.equalsIgnoreCase ("black") ? "white" : "black");
+        setIcon();
         return;
     }
 
-    // Left-click menu options
-    if (id == 1)
+    // Left-click management commands
+    if (id == CMD_PREFERENCES)
     {
         showAudioSettings();
         return;
     }
-    if (id == 2)
+    if (id == CMD_EDIT_PLUGINS)
     {
         reloadPlugins();
         return;
     }
-
-    if (id > 2)
+    if (id == CMD_SCAN_PLUGINS)
     {
-        // Delete plugin
-        if (id >= INDEX_DELETE && id < INDEX_DELETE + 1000000)
+        startPluginScan (false);
+        return;
+    }
+    if (id == CMD_ADD_FOLDER)
+    {
+        chooseCustomPluginFolder();
+        return;
+    }
+    if (id == CMD_CLEAR_RESCAN)
+    {
+        knownPluginList.clear();
+        startPluginScan (true);
+        return;
+    }
+
+    // Active plugins manipulation
+    if (id >= INDEX_DELETE && id < INDEX_DELETE + 1000000)
+    {
+        savePluginStates();
+        const int index = id - INDEX_DELETE;
+        if (index >= 0 && index < (int) activePlugins.size())
+        {
+            PluginWindow::closeCurrentlyOpenWindowsFor ((uint32) (index + 1));
+            const auto plugin = activePlugins[(size_t) index];
+            getAppProperties().getUserSettings()->removeValue (getKey ("bypass", plugin));
+            getAppProperties().getUserSettings()->removeValue (getKey ("order", plugin));
+            getAppProperties().getUserSettings()->removeValue (getKey ("state", plugin));
+
+            activePlugins.erase (activePlugins.begin() + index);
+            saveActivePluginsToSettings();
+            loadActivePlugins();
+        }
+        startTimer (50);
+        return;
+    }
+
+    if (id >= INDEX_BYPASS && id < INDEX_BYPASS + 1000000)
+    {
+        const int index = id - INDEX_BYPASS;
+        if (index >= 0 && index < (int) activePlugins.size())
+        {
+            const auto& plugin = activePlugins[(size_t) index];
+            const String key = getKey ("bypass", plugin);
+            const bool bypassed = getAppProperties().getUserSettings()->getBoolValue (key, false);
+            getAppProperties().getUserSettings()->setValue (key, ! bypassed);
+            getAppProperties().saveIfNeeded();
+
+            updateGraphConnections();
+        }
+        startTimer (50);
+        return;
+    }
+
+    if (id >= INDEX_EDIT && id < INDEX_EDIT + 1000000)
+    {
+        const int index = id - INDEX_EDIT;
+        if (index >= 0 && index < (int) activePlugins.size())
+        {
+            if (auto* const node = graph.getNodeForId (AudioProcessorGraph::NodeID ((uint32) (index + 1))))
+            {
+                if (auto* const w = PluginWindow::getWindowFor (node, PluginWindow::Normal))
+                    w->toFront (true);
+            }
+        }
+        startTimer (50);
+        return;
+    }
+
+    if (id >= INDEX_MOVE_UP && id < INDEX_MOVE_UP + 1000000)
+    {
+        const int index = id - INDEX_MOVE_UP;
+        if (index > 0 && index < (int) activePlugins.size())
         {
             savePluginStates();
-            const int index = id - INDEX_DELETE;
-            if (index >= 0 && index < (int) activePlugins.size())
-            {
-                PluginWindow::closeCurrentlyOpenWindowsFor ((uint32) (index + 1));
-                const auto plugin = activePlugins[(size_t) index];
-                getAppProperties().getUserSettings()->removeValue (getKey ("bypass", plugin));
-                getAppProperties().getUserSettings()->removeValue (getKey ("order", plugin));
-                getAppProperties().getUserSettings()->removeValue (getKey ("state", plugin));
-
-                activePlugins.erase (activePlugins.begin() + index);
-                saveActivePluginsToSettings();
-                loadActivePlugins();
-            }
+            std::swap (activePlugins[(size_t) index], activePlugins[(size_t) (index - 1)]);
+            saveActivePluginsToSettings();
+            loadActivePlugins();
         }
-        // Add plugin from knownPluginList
-        else if (const int chosenIndex = KnownPluginList::getIndexChosenByMenu (knownPluginList.getTypes(), id); chosenIndex > -1)
-        {
-            if (chosenIndex < knownPluginList.getTypes().size())
-            {
-                savePluginStates();
-                PluginDescription plugin = knownPluginList.getTypes().getReference (chosenIndex);
-                activePlugins.push_back (plugin);
-                saveActivePluginsToSettings();
-                loadActivePlugins();
-                notifyIfMonoPlugin (plugin);
-            }
-        }
-        // Bypass plugin
-        else if (id >= INDEX_BYPASS && id < INDEX_BYPASS + 1000000)
-        {
-            const int index = id - INDEX_BYPASS;
-            if (index >= 0 && index < (int) activePlugins.size())
-            {
-                const auto& plugin = activePlugins[(size_t) index];
-                const String key = getKey ("bypass", plugin);
-                const bool bypassed = getAppProperties().getUserSettings()->getBoolValue (key, false);
-                getAppProperties().getUserSettings()->setValue (key, ! bypassed);
-                getAppProperties().saveIfNeeded();
-
-                // High performance: update graph routing instantly without reloading plugins
-                updateGraphConnections();
-            }
-        }
-        // Show plugin editor window
-        else if (id >= INDEX_EDIT && id < INDEX_EDIT + 1000000)
-        {
-            const int index = id - INDEX_EDIT;
-            if (index >= 0 && index < (int) activePlugins.size())
-            {
-                if (auto* const node = graph.getNodeForId (AudioProcessorGraph::NodeID ((uint32) (index + 1))))
-                {
-                    if (auto* const w = PluginWindow::getWindowFor (node, PluginWindow::Normal))
-                        w->toFront (true);
-                }
-            }
-        }
-        // Move plugin up the chain
-        else if (id >= INDEX_MOVE_UP && id < INDEX_MOVE_UP + 1000000)
-        {
-            const int index = id - INDEX_MOVE_UP;
-            if (index > 0 && index < (int) activePlugins.size())
-            {
-                savePluginStates();
-                std::swap (activePlugins[(size_t) index], activePlugins[(size_t) (index - 1)]);
-                saveActivePluginsToSettings();
-                loadActivePlugins();
-            }
-        }
-        // Move plugin down the chain
-        else if (id >= INDEX_MOVE_DOWN && id < INDEX_MOVE_DOWN + 1000000)
-        {
-            const int index = id - INDEX_MOVE_DOWN;
-            if (index >= 0 && index < (int) activePlugins.size() - 1)
-            {
-                savePluginStates();
-                std::swap (activePlugins[(size_t) index], activePlugins[(size_t) (index + 1)]);
-                saveActivePluginsToSettings();
-                loadActivePlugins();
-            }
-        }
-
         startTimer (50);
+        return;
+    }
+
+    if (id >= INDEX_MOVE_DOWN && id < INDEX_MOVE_DOWN + 1000000)
+    {
+        const int index = id - INDEX_MOVE_DOWN;
+        if (index >= 0 && index < (int) activePlugins.size() - 1)
+        {
+            savePluginStates();
+            std::swap (activePlugins[(size_t) index], activePlugins[(size_t) (index + 1)]);
+            saveActivePluginsToSettings();
+            loadActivePlugins();
+        }
+        startTimer (50);
+        return;
+    }
+
+    // Available plugin selection from menu
+    const int chosenIndex = KnownPluginList::getIndexChosenByMenu (knownPluginList.getTypes(), id);
+    if (chosenIndex > -1 && chosenIndex < knownPluginList.getTypes().size())
+    {
+        savePluginStates();
+        PluginDescription plugin = knownPluginList.getTypes().getReference (chosenIndex);
+        activePlugins.push_back (plugin);
+        saveActivePluginsToSettings();
+        loadActivePlugins();
+        notifyIfMonoPlugin (plugin);
+        startTimer (50);
+        return;
     }
 }
 
@@ -590,4 +721,90 @@ void IconMenu::notifyIfMonoPlugin (const PluginDescription& plugin)
             "Its audio output will be automatically routed to both Left and Right stereo output channels.",
             "OK");
     }
+}
+
+void IconMenu::startPluginScan (bool rescanAll, const File& specificFolder)
+{
+    if (isScanning.load())
+    {
+        AlertWindow::showMessageBoxAsync (
+            AlertWindow::InfoIcon,
+            "Scan in Progress",
+            "A plugin scan is already in progress. Please wait for it to complete.",
+            "OK");
+        return;
+    }
+
+    FileSearchPath paths;
+    if (specificFolder.exists())
+        paths.add (specificFolder);
+
+    isScanning.store (true);
+    scanThread = std::make_unique<PluginScanThread> (*this, formatManager, knownPluginList, paths, rescanAll);
+    scanThread->startThread (Priority::normal);
+}
+
+void IconMenu::onPluginScanFinished (int newCount, int totalCount)
+{
+    isScanning.store (false);
+    scanThread.reset();
+
+    std::unique_ptr<XmlElement> xml (knownPluginList.createXml());
+    if (xml != nullptr)
+    {
+        getAppProperties().getUserSettings()->setValue ("pluginList", xml.get());
+        getAppProperties().saveIfNeeded();
+    }
+
+    String message = "Scan completed.\nTotal plugins found: " + String (totalCount);
+    if (newCount > 0)
+        message += " (" + String (newCount) + " new)";
+
+    AlertWindow::showMessageBoxAsync (
+        AlertWindow::InfoIcon,
+        "Plugin Scan Completed",
+        message,
+        "OK");
+}
+
+void IconMenu::chooseCustomPluginFolder()
+{
+    folderChooser = std::make_unique<FileChooser> (
+        "Select Plugin Folder to Scan",
+        File::getSpecialLocation (File::userHomeDirectory),
+        "*",
+        true);
+
+    const auto flags = FileBrowserComponent::openMode | FileBrowserComponent::canSelectDirectories;
+
+    folderChooser->launchAsync (flags, [this](const FileChooser& fc)
+    {
+        const File chosenDir = fc.getResult();
+        if (chosenDir.isDirectory())
+        {
+            addCustomPluginPath (chosenDir.getFullPathName());
+            startPluginScan (false, chosenDir);
+        }
+    });
+}
+
+void IconMenu::addCustomPluginPath (const String& path)
+{
+    String existing = getAppProperties().getUserSettings()->getValue ("customPluginPaths");
+    StringArray paths;
+    paths.addTokens (existing, ";\n", "");
+    if (! paths.contains (path))
+    {
+        paths.add (path);
+        getAppProperties().getUserSettings()->setValue ("customPluginPaths", paths.joinIntoString (";"));
+        getAppProperties().saveIfNeeded();
+    }
+}
+
+StringArray IconMenu::getCustomPluginPaths() const
+{
+    String existing = getAppProperties().getUserSettings()->getValue ("customPluginPaths");
+    StringArray paths;
+    paths.addTokens (existing, ";\n", "");
+    return paths;
 }
