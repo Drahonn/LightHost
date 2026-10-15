@@ -51,7 +51,7 @@ jobs:
           if [[ $GITHUB_REF =~ $VERSION_REGEX ]]; then
               PROJECT_VERSION="${BASH_REMATCH[1]}"
           else
-              PROJECT_VERSION="2.0.0.${GITHUB_RUN_NUMBER}"
+              PROJECT_VERSION="2.1.0"
           fi
           echo "PROJECT_VERSION=${PROJECT_VERSION}" >> $GITHUB_ENV
 
@@ -147,7 +147,7 @@ jobs:
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             echo "RELEASE_TAG=${{ github.ref_name }}" >> $GITHUB_ENV
           else
-            echo "RELEASE_TAG=v2.0.0-build.${{ github.run_number }}" >> $GITHUB_ENV
+            echo "RELEASE_TAG=v2.1.0" >> $GITHUB_ENV
           fi
 
       - name: Download Artifacts
