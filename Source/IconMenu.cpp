@@ -741,7 +741,7 @@ void IconMenu::startPluginScan (bool rescanAll, const File& specificFolder)
 
     isScanning.store (true);
     scanThread = std::make_unique<PluginScanThread> (*this, formatManager, knownPluginList, paths, rescanAll);
-    scanThread->startThread (Priority::normal);
+    scanThread->startThread (Thread::Priority::normal);
 }
 
 void IconMenu::onPluginScanFinished (int newCount, int totalCount)
@@ -775,9 +775,9 @@ void IconMenu::chooseCustomPluginFolder()
         "*",
         true);
 
-    const auto flags = FileBrowserComponent::openMode | FileBrowserComponent::canSelectDirectories;
+    const auto chooserFlags = FileBrowserComponent::openMode | FileBrowserComponent::canSelectDirectories;
 
-    folderChooser->launchAsync (flags, [this](const FileChooser& fc)
+    folderChooser->launchAsync (chooserFlags, [this](const FileChooser& fc)
     {
         const File chosenDir = fc.getResult();
         if (chosenDir.isDirectory())

@@ -2,7 +2,6 @@
 
 #include "JuceHeader.h"
 
-ApplicationProperties& getAppProperties();
 
 class PluginWindow : public DocumentWindow
 {
