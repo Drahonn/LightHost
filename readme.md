@@ -5,7 +5,19 @@ A simple VST/AU host for OS X, Windows, and Linux that sits in the menu/task bar
 
 ### Features
 
-See [#1](https://github.com/rolandoislas/LightHost/issues/1)
+Features
+Add/remove plugins (AU/VST/VST3)
+Change output and input
+Plugin states saved
+Saved plugin order
+Cross platform
+ASIO support
+Plugin bypass
+Plugin re-ordering
+
+TODO
+Allow multiple instances of plugins
+Auto-update
 
 ### Screenshot
 
