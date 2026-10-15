@@ -44,7 +44,8 @@ inline String toString (PluginWindow::WindowFormatType type)
         case PluginWindow::Generic:    return "Generic";
         case PluginWindow::Programs:   return "Programs";
         case PluginWindow::Parameters: return "Parameters";
-        default:                       return String();
+        case PluginWindow::NumTypes:   return {};
+        default:                       return {};
     }
 }
 

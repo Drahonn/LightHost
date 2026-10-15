@@ -65,10 +65,9 @@ class ProcessorProgramPropertyComp : public PropertyComponent,
                                      private AudioProcessorListener
 {
 public:
-    ProcessorProgramPropertyComp (const String& name, AudioProcessor& p, int index_)
+    ProcessorProgramPropertyComp (const String& name, AudioProcessor& p)
         : PropertyComponent (name),
-          owner (p),
-          index (index_)
+          owner (p)
     {
         owner.addListener (this);
     }
@@ -84,7 +83,6 @@ public:
 
 private:
     AudioProcessor& owner;
-    const int index;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ProcessorProgramPropertyComp)
 };
@@ -110,7 +108,7 @@ public:
             if (name.isEmpty())
                 name = "Unnamed";
 
-            auto* pc = new ProcessorProgramPropertyComp (name, *p, i);
+            auto* pc = new ProcessorProgramPropertyComp (name, *p);
             programs.add (pc);
             totalHeight += pc->getPreferredHeight();
         }
@@ -156,7 +154,7 @@ PluginWindow* PluginWindow::getWindowFor (AudioProcessorGraph::Node* const node,
 
     if (type == Normal)
     {
-        ui.reset (processor->createEditorIfNeeded());
+        ui.reset (processor->createEditorAndMakeActive());
         if (ui == nullptr)
             type = Generic;
     }

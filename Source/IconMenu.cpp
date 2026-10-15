@@ -50,7 +50,7 @@ private:
 //==============================================================================
 IconMenu::IconMenu()
 {
-    formatManager.addDefaultFormats();
+    juce::addDefaultFormatsToManager (formatManager);
 
     std::unique_ptr<XmlElement> savedAudioState (getAppProperties().getUserSettings()->getXmlValue ("audioDeviceState"));
     deviceManager.initialise (256, 256, savedAudioState.get(), true);
@@ -86,7 +86,7 @@ void IconMenu::setIcon()
 {
     Image icon;
 #if JUCE_MAC
-    const bool isDark = Desktop::getInstance().isDarkMode();
+    const bool isDark = Desktop::getInstance().isDarkModeActive();
     if (isDark)
         icon = ImageFileFormat::loadFrom (BinaryData::menu_icon_white_png, BinaryData::menu_icon_white_pngSize);
     else
@@ -137,13 +137,12 @@ void IconMenu::loadActivePluginsFromSettings()
         oldList.recreateFromXml (*savedPluginListActive);
 
         std::vector<std::pair<int, PluginDescription>> ordered;
-        for (int i = 0; i < oldList.getNumTypes(); ++i)
+        const auto& types = oldList.getTypes();
+        for (int i = 0; i < types.size(); ++i)
         {
-            if (auto* desc = oldList.getType (i))
-            {
-                int order = getAppProperties().getUserSettings()->getIntValue (getKey ("order", *desc), i);
-                ordered.push_back ({ order, *desc });
-            }
+            const auto& desc = types.getReference (i);
+            int order = getAppProperties().getUserSettings()->getIntValue (getKey ("order", desc), i);
+            ordered.push_back ({ order, desc });
         }
 
         std::sort (ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
@@ -225,7 +224,7 @@ void IconMenu::updateGraphConnections()
         const bool bypass = getAppProperties().getUserSettings()->getBoolValue (bypassKey, false);
 
         const AudioProcessorGraph::NodeID pluginNodeId ((uint32) (i + 1));
-        auto node = graph.getNodeForId (pluginNodeId);
+        auto* node = graph.getNodeForId (pluginNodeId);
 
         if (node == nullptr || bypass)
             continue;
@@ -332,7 +331,7 @@ void IconMenu::timerCallback()
 
         menu.addSeparator();
         menu.addSectionHeader ("Available Plugins");
-        knownPluginList.addToMenu (menu, pluginSortMethod);
+        KnownPluginList::addToMenu (menu, knownPluginList.getTypes(), pluginSortMethod);
     }
     else
     {
@@ -437,12 +436,12 @@ void IconMenu::menuInvocationCallback (int id)
             }
         }
         // Add plugin from knownPluginList
-        else if (const int chosenIndex = knownPluginList.getIndexChosenByMenu (id); chosenIndex > -1)
+        else if (const int chosenIndex = KnownPluginList::getIndexChosenByMenu (knownPluginList.getTypes(), id); chosenIndex > -1)
         {
-            if (auto* chosenType = knownPluginList.getType (chosenIndex))
+            if (chosenIndex < knownPluginList.getTypes().size())
             {
                 savePluginStates();
-                PluginDescription plugin = *chosenType;
+                PluginDescription plugin = knownPluginList.getTypes().getReference (chosenIndex);
                 activePlugins.push_back (plugin);
                 saveActivePluginsToSettings();
                 loadActivePlugins();
@@ -471,9 +470,9 @@ void IconMenu::menuInvocationCallback (int id)
             const int index = id - INDEX_EDIT;
             if (index >= 0 && index < (int) activePlugins.size())
             {
-                if (const auto node = graph.getNodeForId (AudioProcessorGraph::NodeID ((uint32) (index + 1))))
+                if (auto* const node = graph.getNodeForId (AudioProcessorGraph::NodeID ((uint32) (index + 1))))
                 {
-                    if (auto* const w = PluginWindow::getWindowFor (node.get(), PluginWindow::Normal))
+                    if (auto* const w = PluginWindow::getWindowFor (node, PluginWindow::Normal))
                         w->toFront (true);
                 }
             }
@@ -527,7 +526,7 @@ void IconMenu::savePluginStates()
     for (size_t i = 0; i < activePlugins.size(); ++i)
     {
         const auto& plugin = activePlugins[i];
-        if (auto node = graph.getNodeForId (AudioProcessorGraph::NodeID ((uint32) (i + 1))))
+        if (auto* node = graph.getNodeForId (AudioProcessorGraph::NodeID ((uint32) (i + 1))))
         {
             if (auto* processor = node->getProcessor())
             {
