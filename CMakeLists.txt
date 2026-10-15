@@ -13,7 +13,7 @@ set(PROJECT_NAME "LightHost")
 # Read project version from env variable, allowing it to be provided by CI/CD workflow
 set(PROJECT_VERSION $ENV{PROJECT_VERSION})
 if(NOT PROJECT_VERSION)
-    set(PROJECT_VERSION 0.0.0.0)
+    set(PROJECT_VERSION 2.0.0)
 endif()
 
 # For simplicity, the name of the project is also the name of the target

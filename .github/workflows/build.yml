@@ -47,11 +47,11 @@ jobs:
       - name: Set up Environment Variables
         shell: bash
         run: |
-          VERSION_REGEX='^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$'
+          VERSION_REGEX='^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+.*)$'
           if [[ $GITHUB_REF =~ $VERSION_REGEX ]]; then
               PROJECT_VERSION="${BASH_REMATCH[1]}"
           else
-              PROJECT_VERSION="0.0.0.${GITHUB_RUN_NUMBER}"
+              PROJECT_VERSION="2.0.0.${GITHUB_RUN_NUMBER}"
           fi
           echo "PROJECT_VERSION=${PROJECT_VERSION}" >> $GITHUB_ENV
 
@@ -147,11 +147,20 @@ jobs:
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             echo "RELEASE_TAG=${{ github.ref_name }}" >> $GITHUB_ENV
           else
-            echo "RELEASE_TAG=v0.0.0.${{ github.run_number }}" >> $GITHUB_ENV
+            echo "RELEASE_TAG=v2.0.0-build.${{ github.run_number }}" >> $GITHUB_ENV
           fi
 
       - name: Download Artifacts
         uses: actions/download-artifact@v4
+        with:
+          path: release_assets
+          merge-multiple: true
+
+      - name: Inspect Downloaded Artifacts
+        shell: bash
+        run: |
+          echo "=== Files downloaded into release_assets ==="
+          ls -laR release_assets
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -161,8 +170,8 @@ jobs:
           body: ${{ github.event.head_commit.message }}
           generate_release_notes: true
           draft: false
-          prerelease: false
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
           files: |
-            */*.exe
-            */*.dmg
-            */*-Linux
+            release_assets/**/LightHost.exe
+            release_assets/**/LightHost.dmg
+            release_assets/**/LightHost-Linux
