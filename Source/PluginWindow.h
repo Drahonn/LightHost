@@ -1,9 +1,10 @@
-#ifndef PluginWindow_h
-#define PluginWindow_h
+#pragma once
+
+#include "JuceHeader.h"
 
 ApplicationProperties& getAppProperties();
 
-class PluginWindow  : public DocumentWindow
+class PluginWindow : public DocumentWindow
 {
 public:
     enum WindowFormatType
@@ -16,10 +17,9 @@ public:
     };
 
     PluginWindow (Component* pluginEditor, AudioProcessorGraph::Node*, WindowFormatType);
-    ~PluginWindow();
+    ~PluginWindow() override;
 
     static PluginWindow* getWindowFor (AudioProcessorGraph::Node*, WindowFormatType);
-
     static void closeCurrentlyOpenWindowsFor (const uint32 nodeUid);
     static void closeAllCurrentlyOpenWindows();
     static bool containsActiveWindows();
@@ -31,7 +31,7 @@ private:
     AudioProcessorGraph::Node* owner;
     WindowFormatType type;
 
-    float getDesktopScaleFactor() const override     { return 1.0f; }
+    float getDesktopScaleFactor() const override { return 1.0f; }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginWindow)
 };
@@ -48,9 +48,6 @@ inline String toString (PluginWindow::WindowFormatType type)
     }
 }
 
-inline String getLastXProp (PluginWindow::WindowFormatType type)    { return "uiLastX_" + toString (type); }
-inline String getLastYProp (PluginWindow::WindowFormatType type)    { return "uiLastY_" + toString (type); }
-inline String getOpenProp  (PluginWindow::WindowFormatType type)    { return "uiopen_"  + toString (type); }
-
-
-#endif /* PluginWindow_hpp */
+inline String getLastXProp (PluginWindow::WindowFormatType type) { return "uiLastX_" + toString (type); }
+inline String getLastYProp (PluginWindow::WindowFormatType type) { return "uiLastY_" + toString (type); }
+inline String getOpenProp  (PluginWindow::WindowFormatType type) { return "uiopen_"  + toString (type); }

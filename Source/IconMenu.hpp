@@ -1,60 +1,63 @@
-//
-//  IconMenu.hpp
-//  Light Host
-//
-//  Created by Rolando Islas on 12/26/15.
-//
-//
+#pragma once
 
-#ifndef IconMenu_hpp
-#define IconMenu_hpp
+#include "JuceHeader.h"
+#include <vector>
+#include <memory>
 
 ApplicationProperties& getAppProperties();
 
-class IconMenu : public SystemTrayIconComponent, private Timer, public ChangeListener
+class IconMenu : public SystemTrayIconComponent,
+                 private Timer,
+                 public ChangeListener
 {
 public:
     IconMenu();
-    ~IconMenu();
-    void mouseDown(const MouseEvent&);
-    static void menuInvocationCallback(int id, IconMenu*);
-    void changeListenerCallback(ChangeBroadcaster* changed);
-	static String getKey(String type, PluginDescription plugin);
+    ~IconMenu() override;
 
-	const int INDEX_EDIT, INDEX_BYPASS, INDEX_DELETE, INDEX_MOVE_UP, INDEX_MOVE_DOWN;
+    void mouseDown (const MouseEvent&) override;
+    void menuInvocationCallback (int id);
+    void changeListenerCallback (ChangeBroadcaster* changed) override;
+
+    static String getKey (const String& type, const PluginDescription& plugin);
+
+    static constexpr int INDEX_EDIT      = 1000000;
+    static constexpr int INDEX_BYPASS    = 2000000;
+    static constexpr int INDEX_DELETE    = 3000000;
+    static constexpr int INDEX_MOVE_UP   = 4000000;
+    static constexpr int INDEX_MOVE_DOWN = 5000000;
+
+    static constexpr uint32 INPUT_NODE_ID  = 1000000;
+    static constexpr uint32 OUTPUT_NODE_ID = 1000001;
+
 private:
-	#if JUCE_MAC
-    std::string exec(const char* cmd);
-	#endif
-    void timerCallback();
+    void timerCallback() override;
     void reloadPlugins();
     void showAudioSettings();
     void loadActivePlugins();
+    void updateGraphConnections();
     void savePluginStates();
     void deletePluginStates();
-	PluginDescription getNextPluginOlderThanTime(int &time);
-	void removePluginsLackingInputOutput();
-	std::vector<PluginDescription> getTimeSortedList();
-	void setIcon();
-    
+    void saveActivePluginsToSettings();
+    void loadActivePluginsFromSettings();
+    void removePluginsLackingInputOutput();
+    void notifyIfMonoPlugin (const PluginDescription& plugin);
+    void setIcon();
+
     AudioDeviceManager deviceManager;
     AudioPluginFormatManager formatManager;
     KnownPluginList knownPluginList;
-    KnownPluginList activePluginList;
+    std::vector<PluginDescription> activePlugins;
     KnownPluginList::SortMethod pluginSortMethod;
     PopupMenu menu;
-    ScopedPointer<PluginDirectoryScanner> scanner;
-    bool menuIconLeftClicked;
+    bool menuIconLeftClicked { false };
+
     AudioProcessorGraph graph;
     AudioProcessorPlayer player;
-    AudioProcessorGraph::Node *inputNode;
-    AudioProcessorGraph::Node *outputNode;
-	#if JUCE_WINDOWS
-	int x, y;
-	#endif
+    AudioProcessorGraph::Node::Ptr inputNode;
+    AudioProcessorGraph::Node::Ptr outputNode;
 
-	class PluginListWindow;
-	ScopedPointer<PluginListWindow> pluginListWindow;
+    class PluginListWindow;
+    std::unique_ptr<PluginListWindow> pluginListWindow;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (IconMenu)
 };
-
-#endif /* IconMenu_hpp */
