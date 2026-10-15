@@ -27,10 +27,13 @@ jobs:
         include:
           - name: Windows
             os: windows-latest
+            artifact_file: LightHost.exe
           - name: macOS
             os: macos-latest
+            artifact_file: LightHost.dmg
           - name: Linux
             os: ubuntu-latest
+            artifact_file: LightHost-Linux
 
     steps:
       - name: Checkout Code
@@ -94,22 +97,31 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          ARTIFACT_DIR="${{ env.BUILD_DIR }}/${{ env.PROJECT_NAME }}_artefacts/${{ env.BUILD_TYPE }}/Standalone"
-          if [ ! -d "$ARTIFACT_DIR" ]; then
-            ARTIFACT_DIR="${{ env.BUILD_DIR }}/${{ env.PROJECT_NAME }}_artefacts/Standalone"
+          APP_PATH=$(find "${{ env.BUILD_DIR }}" -name "${{ env.PROJECT_NAME }}.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "Error: ${{ env.PROJECT_NAME }}.app not found in ${{ env.BUILD_DIR }}"
+            exit 1
           fi
-          cd "$ARTIFACT_DIR"
+          echo "Found app at: $APP_PATH"
+          APP_DIR=$(dirname "$APP_PATH")
+          cd "$APP_DIR"
           hdiutil create -volname "${{ env.PROJECT_NAME }}" -srcfolder "${{ env.PROJECT_NAME }}.app" -ov -format UDZO "${{ env.PROJECT_NAME }}.dmg"
 
       - name: Prepare Linux Executable
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          ARTIFACT_DIR="${{ env.BUILD_DIR }}/${{ env.PROJECT_NAME }}_artefacts/${{ env.BUILD_TYPE }}/Standalone"
-          if [ ! -d "$ARTIFACT_DIR" ]; then
-            ARTIFACT_DIR="${{ env.BUILD_DIR }}/${{ env.PROJECT_NAME }}_artefacts/Standalone"
+          BIN_PATH=$(find "${{ env.BUILD_DIR }}" -name "${{ env.PROJECT_NAME }}" -type f -perm -111 | head -n 1)
+          if [ -z "$BIN_PATH" ]; then
+            BIN_PATH=$(find "${{ env.BUILD_DIR }}" -name "${{ env.PROJECT_NAME }}" -type f | head -n 1)
           fi
-          cd "$ARTIFACT_DIR"
+          if [ -z "$BIN_PATH" ]; then
+            echo "Error: ${{ env.PROJECT_NAME }} binary not found in ${{ env.BUILD_DIR }}"
+            exit 1
+          fi
+          echo "Found binary at: $BIN_PATH"
+          BIN_DIR=$(dirname "$BIN_PATH")
+          cd "$BIN_DIR"
           chmod +x "${{ env.PROJECT_NAME }}"
           cp "${{ env.PROJECT_NAME }}" "${{ env.PROJECT_NAME }}-Linux"
 
@@ -117,11 +129,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PROJECT_NAME }}-${{ matrix.name }}
-          path: |
-            ${{ env.BUILD_DIR }}/${{ env.PROJECT_NAME }}_artefacts/**/${{ env.PROJECT_NAME }}.exe
-            ${{ env.BUILD_DIR }}/${{ env.PROJECT_NAME }}_artefacts/**/${{ env.PROJECT_NAME }}.dmg
-            ${{ env.BUILD_DIR }}/${{ env.PROJECT_NAME }}_artefacts/**/${{ env.PROJECT_NAME }}-Linux
-          if-no-files-found: warn
+          path: ${{ env.BUILD_DIR }}/**/${{ matrix.artifact_file }}
+          if-no-files-found: error
 
   release:
     if: contains(github.ref, 'tags/v')
