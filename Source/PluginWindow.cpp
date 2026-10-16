@@ -14,8 +14,11 @@ PluginWindow::PluginWindow (Component* const pluginEditor,
 {
     setSize (400, 300);
     setUsingNativeTitleBar (true);
-    if (pluginEditor != nullptr && pluginEditor->isResizable())
-        setResizable (true, false);
+    if (auto* const ed = dynamic_cast<AudioProcessorEditor*> (pluginEditor))
+    {
+        if (ed->isResizable())
+            setResizable (true, false);
+    }
     setContentOwned (pluginEditor, true);
 
     const int defaultX = Random::getSystemRandom().nextInt (300) + 50;

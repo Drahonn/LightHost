@@ -592,7 +592,7 @@ void IconMenu::timerCallback()
     });
 }
 
-void IconMenu::mouseDown (const MouseEvent& e)
+void IconMenu::mouseDown (const MouseEvent& /*e*/)
 {
 #if JUCE_MAC
     Process::setDockIconVisible (true);
@@ -601,7 +601,7 @@ void IconMenu::mouseDown (const MouseEvent& e)
     startTimer (50);
 }
 
-void IconMenu::mouseUp (const MouseEvent& e)
+void IconMenu::mouseUp (const MouseEvent& /*e*/)
 {
     // Ensure menu triggers on mouseUp for systems where mouseDown is consumed by OS tray
     startTimer (50);
