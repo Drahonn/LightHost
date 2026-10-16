@@ -61,8 +61,15 @@ public:
                                            ! rescanAll);
 
             String pluginBeingScanned;
-            while (! threadShouldExit() && scanner.scanNextFile (true, pluginBeingScanned))
+            try
             {
+                while (! threadShouldExit() && scanner.scanNextFile (true, pluginBeingScanned))
+                {
+                }
+            }
+            catch (...)
+            {
+                // Ignore any scanner plugin exceptions; deadMansPedalFile keeps track of crashes
             }
         }
 
@@ -134,7 +141,13 @@ IconMenu::IconMenu()
     juce::addDefaultFormatsToManager (formatManager);
 
     std::unique_ptr<XmlElement> savedAudioState (getAppProperties().getUserSettings()->getXmlValue ("audioDeviceState"));
-    deviceManager.initialise (256, 256, savedAudioState.get(), true);
+    String audioErr = deviceManager.initialise (256, 256, savedAudioState.get(), true);
+    if (audioErr.isNotEmpty() && savedAudioState != nullptr)
+    {
+        // Saved device configuration failed (e.g. driver uninstalled or offline).
+        // Safely fall back to the system default audio device:
+        deviceManager.initialise (256, 256, nullptr, true);
+    }
     deviceManager.addChangeListener (this);
 
     player.setProcessor (&graph);
@@ -212,9 +225,44 @@ void IconMenu::loadActivePluginsFromSettings()
     {
         for (auto* child : xml->getChildIterator())
         {
-            PluginDescription desc;
-            if (desc.loadFromXml (*child))
-                activePlugins.push_back (desc);
+            if (child->hasTagName ("ACTIVE_ITEM"))
+            {
+                ActivePlugin item;
+                item.instanceId = child->getStringAttribute ("instanceId", Uuid().toString());
+                item.bypassed   = child->getBoolAttribute ("bypassed", false);
+
+                if (auto* descChild = child->getChildByName ("PLUGIN"))
+                    item.desc.loadFromXml (*descChild);
+
+                if (auto* stateElem = child->getChildByName ("STATE"))
+                {
+                    const String b64 = stateElem->getAllSubText().trim();
+                    if (b64.isNotEmpty())
+                        item.stateData.fromBase64Encoding (b64);
+                }
+
+                if (item.stateData.getSize() == 0)
+                {
+                    const String legacyState = getAppProperties().getUserSettings()->getValue (getKey ("state", item.desc));
+                    if (legacyState.isNotEmpty())
+                        item.stateData.fromBase64Encoding (legacyState);
+                }
+
+                activePlugins.push_back (std::move (item));
+            }
+            else if (child->hasTagName ("PLUGIN"))
+            {
+                // Simple description child format
+                ActivePlugin item;
+                item.instanceId = Uuid().toString();
+                if (item.desc.loadFromXml (*child))
+                {
+                    const String legacyState = getAppProperties().getUserSettings()->getValue (getKey ("state", item.desc));
+                    if (legacyState.isNotEmpty())
+                        item.stateData.fromBase64Encoding (legacyState);
+                    activePlugins.push_back (std::move (item));
+                }
+            }
         }
         return;
     }
@@ -240,27 +288,59 @@ void IconMenu::loadActivePluginsFromSettings()
         });
 
         for (const auto& item : ordered)
-            activePlugins.push_back (item.second);
+        {
+            ActivePlugin activeItem;
+            activeItem.desc = item.second;
+            activeItem.instanceId = Uuid().toString();
+            activeItem.bypassed = getAppProperties().getUserSettings()->getBoolValue (getKey ("bypass", item.second), false);
+
+            const String legacyState = getAppProperties().getUserSettings()->getValue (getKey ("state", item.second));
+            if (legacyState.isNotEmpty())
+                activeItem.stateData.fromBase64Encoding (legacyState);
+
+            activePlugins.push_back (std::move (activeItem));
+        }
     }
 }
 
 void IconMenu::saveActivePluginsToSettings()
 {
-    auto xml = std::make_unique<XmlElement> ("ACTIVE_PLUGINS");
+    auto root = std::make_unique<XmlElement> ("ACTIVE_PLUGINS");
     for (size_t i = 0; i < activePlugins.size(); ++i)
     {
-        if (auto child = activePlugins[i].createXml())
-            xml->addChildElement (child.release());
+        auto itemXml = std::make_unique<XmlElement> ("ACTIVE_ITEM");
+        itemXml->setAttribute ("instanceId", activePlugins[i].instanceId);
+        itemXml->setAttribute ("bypassed", activePlugins[i].bypassed);
 
-        getAppProperties().getUserSettings()->setValue (getKey ("order", activePlugins[i]), (int) i);
+        if (auto descXml = activePlugins[i].desc.createXml())
+            itemXml->addChildElement (descXml.release());
+
+        if (activePlugins[i].stateData.getSize() > 0)
+        {
+            auto stateElem = std::make_unique<XmlElement> ("STATE");
+            stateElem->addTextElement (activePlugins[i].stateData.toBase64Encoding());
+            itemXml->addChildElement (stateElem.release());
+        }
+
+        root->addChildElement (itemXml.release());
     }
 
-    getAppProperties().getUserSettings()->setValue ("activePluginsXml", xml.get());
+    getAppProperties().getUserSettings()->setValue ("activePluginsXml", root.get());
     getAppProperties().saveIfNeeded();
 }
 
 void IconMenu::loadActivePlugins()
 {
+    const File crashTracker = getAppProperties().getUserSettings()
+                              ->getFile().getSiblingFile ("ActivePluginCrashTracker");
+
+    String crashedPluginId;
+    if (crashTracker.existsAsFile())
+    {
+        crashedPluginId = crashTracker.loadFileAsString().trim();
+        crashTracker.deleteFile();
+    }
+
     PluginWindow::closeAllCurrentlyOpenWindows();
     graph.clear();
 
@@ -271,29 +351,57 @@ void IconMenu::loadActivePlugins()
                                     AudioProcessorGraph::AudioGraphIOProcessor::audioOutputNode),
                                 AudioProcessorGraph::NodeID (OUTPUT_NODE_ID));
 
+    std::vector<String> disabledCrashingPlugins;
+
     for (size_t i = 0; i < activePlugins.size(); ++i)
     {
-        const auto& plugin = activePlugins[i];
+        auto& item = activePlugins[i];
+
+        // If this plugin caused a crash on previous startup, bypass it to allow safe startup
+        if (crashedPluginId.isNotEmpty() && crashedPluginId == item.instanceId)
+        {
+            item.bypassed = true;
+            disabledCrashingPlugins.push_back (item.desc.name);
+            continue;
+        }
+
+        // Set crash tracker before attempting to instantiate plugin
+        crashTracker.replaceWithText (item.instanceId);
+
         String errorMessage;
-        auto instance = formatManager.createPluginInstance (plugin, graph.getSampleRate(), graph.getBlockSize(), errorMessage);
+        auto instance = formatManager.createPluginInstance (item.desc, graph.getSampleRate(), graph.getBlockSize(), errorMessage);
 
         if (instance != nullptr)
         {
-            const String pluginUid = getKey ("state", plugin);
-            const String savedPluginState = getAppProperties().getUserSettings()->getValue (pluginUid);
-            if (savedPluginState.isNotEmpty())
+            if (item.stateData.getSize() > 0)
             {
-                MemoryBlock savedPluginBinary;
-                savedPluginBinary.fromBase64Encoding (savedPluginState);
-                instance->setStateInformation (savedPluginBinary.getData(), (int) savedPluginBinary.getSize());
+                instance->setStateInformation (item.stateData.getData(), (int) item.stateData.getSize());
             }
 
             const uint32 nodeIdValue = (uint32) (i + 1);
             graph.addNode (std::move (instance), AudioProcessorGraph::NodeID (nodeIdValue));
         }
+
+        // Plugin loaded successfully, remove crash tracker
+        crashTracker.deleteFile();
     }
 
     updateGraphConnections();
+
+    if (! disabledCrashingPlugins.empty())
+    {
+        saveActivePluginsToSettings();
+
+        String msg = "The following plugin(s) crashed during startup on the previous session and were bypassed to keep LightHost running safely:\n";
+        for (const auto& name : disabledCrashingPlugins)
+            msg += " • " + name + "\n";
+
+        AlertWindow::showMessageBoxAsync (
+            AlertWindow::WarningIcon,
+            "Plugin Startup Crash Recovery",
+            msg,
+            "OK");
+    }
 }
 
 void IconMenu::updateGraphConnections()
@@ -309,18 +417,15 @@ void IconMenu::updateGraphConnections()
 
     for (size_t i = 0; i < activePlugins.size(); ++i)
     {
-        const auto& plugin = activePlugins[i];
-        const String bypassKey = getKey ("bypass", plugin);
-        const bool bypass = getAppProperties().getUserSettings()->getBoolValue (bypassKey, false);
-
+        const auto& item = activePlugins[i];
         const AudioProcessorGraph::NodeID pluginNodeId ((uint32) (i + 1));
         auto* node = graph.getNodeForId (pluginNodeId);
 
-        if (node == nullptr || bypass)
+        if (node == nullptr || item.bypassed)
             continue;
 
-        const int numInputs  = plugin.numInputChannels;
-        const int numOutputs = plugin.numOutputChannels;
+        const int numInputs  = item.desc.numInputChannels;
+        const int numOutputs = item.desc.numOutputChannels;
 
         // Connect source to plugin inputs
         if (numInputs >= 2)
@@ -369,11 +474,16 @@ void IconMenu::changeListenerCallback (ChangeBroadcaster* changed)
     }
     else if (changed == &deviceManager)
     {
-        std::unique_ptr<XmlElement> audioState (deviceManager.createStateXml());
-        if (audioState != nullptr)
+        // Only save state if an audio device is actually active.
+        // This avoids overwriting the user configuration when the PC wakes from sleep or driver restarts.
+        if (deviceManager.getCurrentAudioDevice() != nullptr)
         {
-            getAppProperties().getUserSettings()->setValue ("audioDeviceState", audioState.get());
-            getAppProperties().saveIfNeeded();
+            std::unique_ptr<XmlElement> audioState (deviceManager.createStateXml());
+            if (audioState != nullptr)
+            {
+                getAppProperties().getUserSettings()->setValue ("audioDeviceState", audioState.get());
+                getAppProperties().saveIfNeeded();
+            }
         }
     }
 }
@@ -386,83 +496,95 @@ void IconMenu::timerCallback()
     const String appName = JUCEApplication::getInstance() != nullptr
                                ? JUCEApplication::getInstance()->getApplicationName()
                                : "Light Host";
-    menu.addSectionHeader (appName);
+    const String headerText = appName + " v" + ProjectInfo::versionString;
+    menu.addSectionHeader (headerText);
 
-    if (menuIconLeftClicked)
+    // Active Plugins Submenu
+    menu.addSectionHeader ("Active Plugins");
+    if (activePlugins.empty())
     {
-        menu.addItem (CMD_PREFERENCES, "Audio Settings");
-        menu.addItem (CMD_EDIT_PLUGINS, "Edit Plugins List...");
-        menu.addSeparator();
-
-        menu.addSectionHeader ("Plugin Scanner");
-        if (isScanning.load())
-        {
-            menu.addItem (-1, "Scanning in progress...", false);
-        }
-        else
-        {
-            menu.addItem (CMD_SCAN_PLUGINS, "Scan for Plugins");
-            menu.addItem (CMD_ADD_FOLDER, "Add Plugin Folder...");
-            menu.addItem (CMD_CLEAR_RESCAN, "Clear & Rescan All");
-        }
-
-        menu.addSeparator();
-        menu.addSectionHeader ("Active Plugins");
-
+        menu.addItem (-3, "(No active plugins)", false);
+    }
+    else
+    {
         for (size_t i = 0; i < activePlugins.size(); ++i)
         {
-            const auto& plugin = activePlugins[i];
+            const auto& item = activePlugins[i];
             const int idx = (int) i;
 
             PopupMenu options;
             options.addItem (INDEX_EDIT + idx, "Edit");
-
-            const String bypassKey = getKey ("bypass", plugin);
-            const bool bypass = getAppProperties().getUserSettings()->getBoolValue (bypassKey, false);
-            options.addItem (INDEX_BYPASS + idx, "Bypass", true, bypass);
+            options.addItem (INDEX_BYPASS + idx, "Bypass", true, item.bypassed);
             options.addSeparator();
             options.addItem (INDEX_MOVE_UP + idx, "Move Up", idx > 0);
             options.addItem (INDEX_MOVE_DOWN + idx, "Move Down", idx < (int) activePlugins.size() - 1);
             options.addSeparator();
             options.addItem (INDEX_DELETE + idx, "Delete");
 
-            String displayName = plugin.name;
-            if (plugin.numOutputChannels == 1 || plugin.numInputChannels == 1)
+            String displayName = item.desc.name;
+            if (item.bypassed)
+                displayName += " [Bypassed]";
+            if (item.desc.numOutputChannels == 1 || item.desc.numInputChannels == 1)
                 displayName += " [Mono]";
 
             menu.addSubMenu (displayName, options);
         }
+    }
 
-        menu.addSeparator();
-        menu.addSectionHeader ("Available Plugins");
-        if (knownPluginList.getTypes().isEmpty())
-        {
-            if (isScanning.load())
-                menu.addItem (-2, "(Scanning in progress...)", false);
-            else
-                menu.addItem (-2, "(No plugins found - click 'Scan for Plugins' above)", false);
-        }
+    // Available Plugins Submenu
+    menu.addSeparator();
+    menu.addSectionHeader ("Available Plugins");
+    if (knownPluginList.getTypes().isEmpty())
+    {
+        if (isScanning.load())
+            menu.addItem (-2, "(Scanning in progress...)", false);
         else
-        {
-            KnownPluginList::addToMenu (menu, knownPluginList.getTypes(), pluginSortMethod);
-        }
+            menu.addItem (-2, "(No plugins found - click 'Scan for Plugins' below)", false);
     }
     else
     {
-        menu.addItem (CMD_QUIT, "Quit");
-        menu.addSeparator();
-        menu.addItem (CMD_DELETE_STATES, "Delete Plugin States");
-        #if ! JUCE_MAC
-        menu.addItem (CMD_INVERT_ICON, "Invert Icon Color");
-        #endif
+        KnownPluginList::addToMenu (menu, knownPluginList.getTypes(), pluginSortMethod);
     }
 
+    // Audio & Plugin Management
+    menu.addSeparator();
+    PopupMenu scannerMenu;
+    if (isScanning.load())
+    {
+        scannerMenu.addItem (-1, "Scanning in progress...", false);
+    }
+    else
+    {
+        scannerMenu.addItem (CMD_SCAN_PLUGINS, "Scan for Plugins");
+        scannerMenu.addItem (CMD_ADD_FOLDER, "Add Plugin Folder...");
+        scannerMenu.addItem (CMD_CLEAR_RESCAN, "Clear & Rescan All");
+    }
+    menu.addSubMenu ("Plugin Scanner", scannerMenu);
+
+    menu.addItem (CMD_PREFERENCES, "Audio Settings...");
+    menu.addItem (CMD_EDIT_PLUGINS, "Edit Plugins List...");
+    menu.addItem (CMD_RESTART_AUDIO, "Restart Audio Engine");
+
+    // Utilities Submenu
+    menu.addSeparator();
+    PopupMenu utilsMenu;
+    utilsMenu.addItem (CMD_OPEN_SETTINGS, "Open Settings Folder");
+    utilsMenu.addItem (CMD_DELETE_STATES, "Delete Plugin States");
+    utilsMenu.addItem (CMD_RESET_SETTINGS, "Reset All Settings...");
+#if ! JUCE_MAC
+    utilsMenu.addItem (CMD_INVERT_ICON, "Invert Icon Color");
+#endif
+    menu.addSubMenu ("Settings & Utilities", utilsMenu);
+
+    menu.addSeparator();
+    menu.addItem (CMD_QUIT, "Quit");
+
     PopupMenu::Options popupOptions;
-    #if JUCE_MAC || JUCE_LINUX
+#if JUCE_MAC || JUCE_LINUX
     popupOptions = popupOptions.withTargetComponent (this);
-    #else
+#else
     popupOptions = popupOptions.withMousePosition();
-    #endif
+#endif
 
     menu.showMenuAsync (popupOptions, [this](int result)
     {
@@ -472,11 +594,16 @@ void IconMenu::timerCallback()
 
 void IconMenu::mouseDown (const MouseEvent& e)
 {
-    #if JUCE_MAC
+#if JUCE_MAC
     Process::setDockIconVisible (true);
-    #endif
+#endif
     Process::makeForegroundProcess();
-    menuIconLeftClicked = e.mods.isLeftButtonDown();
+    startTimer (50);
+}
+
+void IconMenu::mouseUp (const MouseEvent& e)
+{
+    // Ensure menu triggers on mouseUp for systems where mouseDown is consumed by OS tray
     startTimer (50);
 }
 
@@ -484,19 +611,44 @@ void IconMenu::menuInvocationCallback (int id)
 {
     if (id <= 0)
     {
-        #if JUCE_MAC
+#if JUCE_MAC
         if (! PluginWindow::containsActiveWindows())
             Process::setDockIconVisible (false);
-        #endif
+#endif
         return;
     }
 
-    // Right-click menu options
+    // Top-level application commands
     if (id == CMD_QUIT)
     {
         savePluginStates();
         if (auto* app = JUCEApplication::getInstance())
             app->quit();
+        return;
+    }
+    if (id == CMD_PREFERENCES)
+    {
+        showAudioSettings();
+        return;
+    }
+    if (id == CMD_EDIT_PLUGINS)
+    {
+        reloadPlugins();
+        return;
+    }
+    if (id == CMD_RESTART_AUDIO)
+    {
+        restartAudioEngine();
+        return;
+    }
+    if (id == CMD_OPEN_SETTINGS)
+    {
+        openSettingsFolder();
+        return;
+    }
+    if (id == CMD_RESET_SETTINGS)
+    {
+        resetAllSettings();
         return;
     }
     if (id == CMD_DELETE_STATES)
@@ -513,17 +665,7 @@ void IconMenu::menuInvocationCallback (int id)
         return;
     }
 
-    // Left-click management commands
-    if (id == CMD_PREFERENCES)
-    {
-        showAudioSettings();
-        return;
-    }
-    if (id == CMD_EDIT_PLUGINS)
-    {
-        reloadPlugins();
-        return;
-    }
+    // Scanner commands
     if (id == CMD_SCAN_PLUGINS)
     {
         startPluginScan (false);
@@ -549,11 +691,6 @@ void IconMenu::menuInvocationCallback (int id)
         if (index >= 0 && index < (int) activePlugins.size())
         {
             PluginWindow::closeCurrentlyOpenWindowsFor ((uint32) (index + 1));
-            const auto plugin = activePlugins[(size_t) index];
-            getAppProperties().getUserSettings()->removeValue (getKey ("bypass", plugin));
-            getAppProperties().getUserSettings()->removeValue (getKey ("order", plugin));
-            getAppProperties().getUserSettings()->removeValue (getKey ("state", plugin));
-
             activePlugins.erase (activePlugins.begin() + index);
             saveActivePluginsToSettings();
             loadActivePlugins();
@@ -567,12 +704,8 @@ void IconMenu::menuInvocationCallback (int id)
         const int index = id - INDEX_BYPASS;
         if (index >= 0 && index < (int) activePlugins.size())
         {
-            const auto& plugin = activePlugins[(size_t) index];
-            const String key = getKey ("bypass", plugin);
-            const bool bypassed = getAppProperties().getUserSettings()->getBoolValue (key, false);
-            getAppProperties().getUserSettings()->setValue (key, ! bypassed);
-            getAppProperties().saveIfNeeded();
-
+            activePlugins[(size_t) index].bypassed = ! activePlugins[(size_t) index].bypassed;
+            saveActivePluginsToSettings();
             updateGraphConnections();
         }
         startTimer (50);
@@ -628,7 +761,11 @@ void IconMenu::menuInvocationCallback (int id)
     {
         savePluginStates();
         PluginDescription plugin = knownPluginList.getTypes().getReference (chosenIndex);
-        activePlugins.push_back (plugin);
+        ActivePlugin newItem;
+        newItem.desc = plugin;
+        newItem.instanceId = Uuid().toString();
+        newItem.bypassed = false;
+        activePlugins.push_back (std::move (newItem));
         saveActivePluginsToSettings();
         loadActivePlugins();
         notifyIfMonoPlugin (plugin);
@@ -644,11 +781,13 @@ String IconMenu::getKey (const String& type, const PluginDescription& plugin)
 
 void IconMenu::deletePluginStates()
 {
-    for (const auto& plugin : activePlugins)
+    for (auto& item : activePlugins)
     {
-        const String pluginUid = getKey ("state", plugin);
+        item.stateData.reset();
+        const String pluginUid = getKey ("state", item.desc);
         getAppProperties().getUserSettings()->removeValue (pluginUid);
     }
+    saveActivePluginsToSettings();
     getAppProperties().saveIfNeeded();
 }
 
@@ -656,26 +795,22 @@ void IconMenu::savePluginStates()
 {
     for (size_t i = 0; i < activePlugins.size(); ++i)
     {
-        const auto& plugin = activePlugins[i];
         if (auto* node = graph.getNodeForId (AudioProcessorGraph::NodeID ((uint32) (i + 1))))
         {
             if (auto* processor = node->getProcessor())
             {
-                MemoryBlock savedStateBinary;
-                processor->getStateInformation (savedStateBinary);
-                const String pluginUid = getKey ("state", plugin);
-                getAppProperties().getUserSettings()->setValue (pluginUid, savedStateBinary.toBase64Encoding());
+                processor->getStateInformation (activePlugins[i].stateData);
             }
         }
     }
-    getAppProperties().saveIfNeeded();
+    saveActivePluginsToSettings();
 }
 
 void IconMenu::showAudioSettings()
 {
     auto audioSettingsComp = std::make_unique<AudioDeviceSelectorComponent> (
-        deviceManager, 0, 256, 0, 256, false, false, true, false);
-    audioSettingsComp->setSize (500, 600);
+        deviceManager, 1, 2, 1, 2, false, false, true, false);
+    audioSettingsComp->setSize (480, 520);
 
     DialogWindow::LaunchOptions o;
     o.content.set (audioSettingsComp.release(), true);
@@ -684,9 +819,44 @@ void IconMenu::showAudioSettings()
     o.dialogBackgroundColour        = LookAndFeel::getDefaultLookAndFeel().findColour (ResizableWindow::backgroundColourId);
     o.escapeKeyTriggersCloseButton  = true;
     o.useNativeTitleBar             = true;
-    o.resizable                     = false;
+    o.resizable                     = true;
 
     o.launchAsync();
+}
+
+void IconMenu::restartAudioEngine()
+{
+    deviceManager.restartLastAudioDevice();
+}
+
+void IconMenu::openSettingsFolder()
+{
+    File settingsFile = getAppProperties().getUserSettings()->getFile();
+    settingsFile.getParentDirectory().startAsProcess();
+}
+
+void IconMenu::resetAllSettings()
+{
+    AlertWindow::showOkCancelBox (
+        AlertWindow::WarningIcon,
+        "Reset All Settings",
+        "Are you sure you want to reset all LightHost settings?\nThis will clear active plugins, custom scan folders, and audio device preferences.",
+        "Reset",
+        "Cancel",
+        nullptr,
+        ModalCallbackFunction::create ([this](int result)
+        {
+            if (result == 1) // OK / Reset clicked
+            {
+                PluginWindow::closeAllCurrentlyOpenWindows();
+                graph.clear();
+                activePlugins.clear();
+                getAppProperties().getUserSettings()->clear();
+                getAppProperties().saveIfNeeded();
+                deviceManager.initialise (256, 256, nullptr, true);
+                loadActivePlugins();
+            }
+        }));
 }
 
 void IconMenu::reloadPlugins()

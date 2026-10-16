@@ -7,6 +7,14 @@
 
 ApplicationProperties& getAppProperties();
 
+struct ActivePlugin
+{
+    PluginDescription desc;
+    String instanceId;
+    bool bypassed = false;
+    MemoryBlock stateData;
+};
+
 class IconMenu : public SystemTrayIconComponent,
                  private Timer,
                  public ChangeListener
@@ -16,34 +24,41 @@ public:
     ~IconMenu() override;
 
     void mouseDown (const MouseEvent&) override;
+    void mouseUp (const MouseEvent&) override;
     void menuInvocationCallback (int id);
     void changeListenerCallback (ChangeBroadcaster* changed) override;
 
     static String getKey (const String& type, const PluginDescription& plugin);
 
-    static constexpr int CMD_PREFERENCES   = 100000;
-    static constexpr int CMD_EDIT_PLUGINS  = 100001;
-    static constexpr int CMD_SCAN_PLUGINS  = 100002;
-    static constexpr int CMD_ADD_FOLDER    = 100003;
-    static constexpr int CMD_CLEAR_RESCAN  = 100004;
+    static constexpr int CMD_PREFERENCES      = 100000;
+    static constexpr int CMD_EDIT_PLUGINS     = 100001;
+    static constexpr int CMD_SCAN_PLUGINS     = 100002;
+    static constexpr int CMD_ADD_FOLDER       = 100003;
+    static constexpr int CMD_CLEAR_RESCAN     = 100004;
+    static constexpr int CMD_RESTART_AUDIO    = 100005;
 
-    static constexpr int CMD_QUIT          = 100010;
-    static constexpr int CMD_DELETE_STATES = 100011;
-    static constexpr int CMD_INVERT_ICON   = 100012;
+    static constexpr int CMD_QUIT             = 100010;
+    static constexpr int CMD_DELETE_STATES    = 100011;
+    static constexpr int CMD_INVERT_ICON      = 100012;
+    static constexpr int CMD_OPEN_SETTINGS    = 100013;
+    static constexpr int CMD_RESET_SETTINGS   = 100014;
 
-    static constexpr int INDEX_EDIT        = 1000000;
-    static constexpr int INDEX_BYPASS      = 2000000;
-    static constexpr int INDEX_DELETE      = 3000000;
-    static constexpr int INDEX_MOVE_UP     = 4000000;
-    static constexpr int INDEX_MOVE_DOWN   = 5000000;
+    static constexpr int INDEX_EDIT           = 1000000;
+    static constexpr int INDEX_BYPASS         = 2000000;
+    static constexpr int INDEX_DELETE         = 3000000;
+    static constexpr int INDEX_MOVE_UP        = 4000000;
+    static constexpr int INDEX_MOVE_DOWN      = 5000000;
 
-    static constexpr uint32 INPUT_NODE_ID  = 1000000;
-    static constexpr uint32 OUTPUT_NODE_ID = 1000001;
+    static constexpr uint32 INPUT_NODE_ID     = 1000000;
+    static constexpr uint32 OUTPUT_NODE_ID    = 1000001;
 
 private:
     void timerCallback() override;
     void reloadPlugins();
     void showAudioSettings();
+    void restartAudioEngine();
+    void resetAllSettings();
+    void openSettingsFolder();
     void loadActivePlugins();
     void updateGraphConnections();
     void savePluginStates();
@@ -64,10 +79,9 @@ private:
     AudioDeviceManager deviceManager;
     AudioPluginFormatManager formatManager;
     KnownPluginList knownPluginList;
-    std::vector<PluginDescription> activePlugins;
+    std::vector<ActivePlugin> activePlugins;
     KnownPluginList::SortMethod pluginSortMethod;
     PopupMenu menu;
-    bool menuIconLeftClicked { false };
 
     AudioProcessorGraph graph;
     AudioProcessorPlayer player;
@@ -84,3 +98,4 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (IconMenu)
 };
+

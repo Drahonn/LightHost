@@ -13,7 +13,7 @@ set(PROJECT_NAME "LightHost")
 # Read project version from env variable, allowing it to be provided by CI/CD workflow
 set(PROJECT_VERSION $ENV{PROJECT_VERSION})
 if(NOT PROJECT_VERSION)
-    set(PROJECT_VERSION 2.1.0)
+    set(PROJECT_VERSION 2.2.0)
 endif()
 
 # For simplicity, the name of the project is also the name of the target
@@ -46,7 +46,9 @@ juce_add_gui_app("${PROJECT_NAME}"
     FORMATS Standalone # Valid formats: Standalone
     ICON_BIG Resources/icon.png
     ICON_SMALL Resources/menu_icon.png
-    PRODUCT_NAME "${PROJECT_NAME}")
+    PRODUCT_NAME "${PROJECT_NAME}"
+    PLIST_TO_MERGE
+        "<plist><dict><key>NSMicrophoneUsageDescription</key><string>LightHost requires audio input access to process audio through your VST and AU plugins.</string></dict></plist>")
 
 # `juce_generate_juce_header` will create a JuceHeader.h for a given target
 juce_generate_juce_header("${PROJECT_NAME}")
@@ -80,10 +82,11 @@ target_compile_definitions("${PROJECT_NAME}"
     PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
-    JUCE_WASAPI=1
+    JUCE_WASAPI=$<IF:$<PLATFORM_ID:Windows>,1,0>
     JUCE_DIRECTSOUND=0
-    JUCE_ALSA=0
-    JUCE_ASIO=1
+    JUCE_ALSA=$<IF:$<PLATFORM_ID:Linux>,1,0>
+    JUCE_JACK=$<IF:$<PLATFORM_ID:Linux>,1,0>
+    JUCE_ASIO=$<IF:$<PLATFORM_ID:Windows>,1,0>
     JUCE_USE_CAMERA=0
     JUCE_USE_FLAC=0
     JUCE_USE_OGGVORBIS=0

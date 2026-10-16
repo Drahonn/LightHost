@@ -51,7 +51,7 @@ jobs:
           if [[ $GITHUB_REF =~ $VERSION_REGEX ]]; then
               PROJECT_VERSION="${BASH_REMATCH[1]}"
           else
-              PROJECT_VERSION="2.1.0"
+              PROJECT_VERSION="2.2.0"
           fi
           echo "PROJECT_VERSION=${PROJECT_VERSION}" >> $GITHUB_ENV
 
@@ -89,7 +89,12 @@ jobs:
       # --- Build ---
       - name: CMake Configure
         shell: bash
-        run: cmake -B ${{ env.BUILD_DIR }} -G Ninja -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} .
+        run: |
+          EXTRA_ARGS=""
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            EXTRA_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+          fi
+          cmake -B ${{ env.BUILD_DIR }} -G Ninja -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} $EXTRA_ARGS .
 
       - name: CMake Build
         shell: bash
@@ -147,7 +152,7 @@ jobs:
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             echo "RELEASE_TAG=${{ github.ref_name }}" >> $GITHUB_ENV
           else
-            echo "RELEASE_TAG=v2.1.0" >> $GITHUB_ENV
+            echo "RELEASE_TAG=v2.2.0" >> $GITHUB_ENV
           fi
 
       - name: Download Artifacts
